@@ -5,7 +5,31 @@ using System.Diagnostics;
 using System.Text;
 using TestProject;
 
-var num = int.MaxValue;
+// Test write speed
+
+FileStream testStream = File.Open("Test.bin", FileMode.OpenOrCreate);
+
+
+using var memoryStream = new MemoryStream();
+for(int i = 0; i < int.MaxValue; i++)
+{
+    testStream.WriteInt(i);
+}
+
+testStream.Seek(0, SeekOrigin.Begin);
+
+for(int i = 0; i < int.MaxValue; i++)
+{
+    int t = testStream.ReadInt();
+}
+
+//memoryStream.CopyTo(testStream);
+
+testStream.Flush();
+
+
+return;
+var num = 1000;
 
 var d = new DiskIndex<long, long>(num);
 
@@ -20,7 +44,7 @@ for(long i = 0; i < num; i++)
     var id = i;
     d[id] = i;
 
-    if (i % 1000000 == 0)
+    //if (i % 1000000 == 0)
         Console.WriteLine($"id: {id} val: {i}");
 }
 
@@ -34,7 +58,7 @@ foreach(var key in d.GetKeys())
     var id = key;
     var val = d[id];
 
-    if(counter++ % 1000000 == 0)
+    //if(counter++ % 1000000 == 0)
         Console.WriteLine($"id: {id} val: {val}");
 }
 

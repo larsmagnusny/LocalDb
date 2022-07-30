@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -9,19 +10,19 @@ using System.Text;
 
 namespace DB
 {
-    public class Serializer<T>
+    public class Serializer<T> : ISerializer<T>
     {
         private readonly Type _type;
         private readonly Dictionary<string, MethodInfo> _staticMethods;
         private readonly Dictionary<Type, MethodInfo> _getBytes;
-        private readonly Dictionary<Type, Func<Expression, Expression, Expression>> _primitiveByteReaders;
+        private readonly Dictionary<Type, Func<Expression, Expression>> _primitiveByteReaders;
         private readonly Dictionary<Type, Func<Expression, Expression, Expression>> _primitiveByteWriters;
 
-        private readonly Dictionary<Type, Func<Expression, Expression, Expression, Expression>> _builtInByteReaders;
+        private readonly Dictionary<Type, Func<Expression, Expression, Expression>> _builtInByteReaders;
         private readonly Dictionary<Type, Func<Expression, Expression, Expression>> _builtInByteWriters;
 
-        public Func<T, byte[]> Serialize { get; private set; }
-        public Func<byte[], int, T> Deserialize { get; private set; }
+        private Func<T, byte[]> _serialize;
+        private Func<Stream, T> _deserialize;
 
         public Serializer()
         {
@@ -47,20 +48,20 @@ namespace DB
                 { "BitConverter.ToUInt16", bcMethods.FirstOrDefault(o => o.Name == "ToUInt16") }
             };
 
-            _primitiveByteReaders = new Dictionary<Type, Func<Expression, Expression, Expression>>()
+            _primitiveByteReaders = new Dictionary<Type, Func<Expression, Expression>>()
             {
-                { typeof(bool), (input, offset) => Expression.Call(_staticMethods["BitConverter.ToBoolean"], input, offset) },
-                { typeof(byte), (input, offset) => Expression.ArrayAccess(input, offset) },
-                { typeof(sbyte), (input, offset) => Expression.Convert(Expression.ArrayAccess(input, offset), typeof(sbyte)) },
-                { typeof(char), (input, offset) => Expression.Call(_staticMethods["BitConverter.ToChar"], input, offset) },
-                { typeof(double), (input, offset) => Expression.Call(_staticMethods["BitConverter.ToDouble"], input, offset) },
-                { typeof(float), (input, offset) => Expression.Call(_staticMethods["BitConverter.ToSingle"], input, offset) },
-                { typeof(int), (input, offset) => Expression.Call(_staticMethods["BitConverter.ToInt32"], input, offset) },
-                { typeof(uint), (input, offset) => Expression.Call(_staticMethods["BitConverter.ToUInt32"], input, offset) },
-                { typeof(long), (input, offset) => Expression.Call(_staticMethods["BitConverter.ToInt64"], input, offset) },
-                { typeof(ulong), (input, offset) => Expression.Call(_staticMethods["BitConverter.ToUInt64"], input, offset) },
-                { typeof(short), (input, offset) => Expression.Call(_staticMethods["BitConverter.ToInt16"], input, offset) },
-                { typeof(ushort), (input, offset) => Expression.Call(_staticMethods["BitConverter.ToUInt16"], input, offset) },
+                { typeof(bool), (input) => Expression.Call(_staticMethods["BitConverter.ToBoolean"], input, Expression.Constant(0)) },
+                { typeof(byte), (input) => Expression.ArrayAccess(input, Expression.Constant(0)) },
+                { typeof(sbyte), (input) => Expression.Convert(Expression.ArrayAccess(input, Expression.Constant(0)), typeof(sbyte)) },
+                { typeof(char), (input) => Expression.Call(_staticMethods["BitConverter.ToChar"], input, Expression.Constant(0)) },
+                { typeof(double), (input) => Expression.Call(_staticMethods["BitConverter.ToDouble"], input, Expression.Constant(0)) },
+                { typeof(float), (input) => Expression.Call(_staticMethods["BitConverter.ToSingle"], input, Expression.Constant(0)) },
+                { typeof(int), (input) => Expression.Call(_staticMethods["BitConverter.ToInt32"], input, Expression.Constant(0)) },
+                { typeof(uint), (input) => Expression.Call(_staticMethods["BitConverter.ToUInt32"], input, Expression.Constant(0)) },
+                { typeof(long), (input) => Expression.Call(_staticMethods["BitConverter.ToInt64"], input, Expression.Constant(0)) },
+                { typeof(ulong), (input) => Expression.Call(_staticMethods["BitConverter.ToUInt64"], input, Expression.Constant(0)) },
+                { typeof(short), (input) => Expression.Call(_staticMethods["BitConverter.ToInt16"], input, Expression.Constant(0)) },
+                { typeof(ushort), (input) => Expression.Call(_staticMethods["BitConverter.ToUInt16"], input, Expression.Constant(0)) },
             };
 
             _primitiveByteWriters = new Dictionary<Type, Func<Expression, Expression, Expression>>()
@@ -79,10 +80,10 @@ namespace DB
                 { typeof(ushort), (input, output) => Expression.Assign(output, Expression.Call(_getBytes[input.Type], input)) },
             };
 
-            _builtInByteReaders = new Dictionary<Type, Func<Expression, Expression, Expression, Expression>>()
+            _builtInByteReaders = new Dictionary<Type, Func<Expression, Expression, Expression>>()
             {
                 {
-                    typeof(Guid), (input, output, offset) =>
+                    typeof(Guid), (input, output) =>
                     {
                         var byteVar = Expression.Variable(typeof(byte[]), "bytes");
                         var assignByteVar = Expression.Assign(
@@ -92,7 +93,7 @@ namespace DB
                                 Enumerable.Range(0, 16).Select(
                                     o => Expression.ArrayIndex(
                                             input,
-                                            Expression.Add(offset, Expression.Constant(o))
+                                            Expression.Constant(o)
                                         )
                                     )
                                 )
@@ -106,7 +107,7 @@ namespace DB
                     }
                 },
                 {
-                    typeof(string), (input, output, offset) =>
+                    typeof(string), (input, output) =>
                     {
                         var unicodeProperty = typeof(Encoding).GetProperty("Unicode", BindingFlags.Public | BindingFlags.Static);
 
@@ -115,14 +116,14 @@ namespace DB
 
                         var propertyAccess = Expression.Property(null, unicodeProperty);
 
-                        return Expression.Assign(output, Expression.Call(propertyAccess, methodInfo, input, Expression.Add(offset, Expression.Constant(4)), Expression.Call(_staticMethods["BitConverter.ToInt32"], input, offset)));
+                        return Expression.Assign(output, Expression.Call(propertyAccess, methodInfo, input, Expression.Constant(4), Expression.Call(_staticMethods["BitConverter.ToInt32"], input, Expression.Constant(0))));
                     }
                 },
                 {
-                    typeof(DateTime), (input, output, offset) =>
+                    typeof(DateTime), (input, output) =>
                     {
                         var longVar = Expression.Variable(typeof(long), "bin");
-                        var assignLongVar = Expression.Assign(longVar, Expression.Call(_staticMethods["BitConverter.ToInt64"], input, offset));
+                        var assignLongVar = Expression.Assign(longVar, Expression.Call(_staticMethods["BitConverter.ToInt64"], input, Expression.Constant(0)));
 
                         var newDtMethod = typeof(DateTime).GetMethod("FromBinary", BindingFlags.Public | BindingFlags.Static);
 
@@ -130,7 +131,7 @@ namespace DB
                     }
                 },
                 {
-                    typeof(decimal), (input, output, offset) =>
+                    typeof(decimal), (input, output) =>
                     {
                         //return new decimal(
                         //    BitConverter.ToInt32(bytes, 0),
@@ -146,11 +147,11 @@ namespace DB
                         var constructor = typeof(decimal).GetConstructor(new[]{ intType, intType, intType, boolType, byteType });
 
                         return Expression.Assign(output, Expression.New(constructor,
-                                   Expression.Call(_staticMethods["BitConverter.ToInt32"], input, offset),
-                                   Expression.Call(_staticMethods["BitConverter.ToInt32"], input, Expression.Add(offset, Expression.Constant(4))),
-                                   Expression.Call(_staticMethods["BitConverter.ToInt32"], input, Expression.Add(offset, Expression.Constant(8))),
-                                   Expression.Equal(Expression.ArrayAccess(input, Expression.Add(offset, Expression.Constant(15))), Expression.Constant(128)),
-                                   Expression.ArrayAccess(input, Expression.Add(offset, Expression.Constant(14)))
+                                   Expression.Call(_staticMethods["BitConverter.ToInt32"], input, Expression.Constant(0)),
+                                   Expression.Call(_staticMethods["BitConverter.ToInt32"], input, Expression.Constant(4)),
+                                   Expression.Call(_staticMethods["BitConverter.ToInt32"], input, Expression.Constant(8)),
+                                   Expression.Equal(Expression.ArrayAccess(input, Expression.Constant(15)), Expression.Constant(128)),
+                                   Expression.ArrayAccess(input, Expression.Constant(14))
                               ));
                     }
                 }
@@ -330,10 +331,10 @@ namespace DB
             var deserializer = CreateDeserializer();
 
             if(serializer != null)
-                Serialize = serializer.Compile();
+                _serialize = serializer.Compile();
 
             if(deserializer != null)
-                Deserialize = deserializer.Compile();
+                _deserialize = deserializer.Compile();
         }
 
         public Expression<Func<T, byte[]>> CreateSerializer()
@@ -368,30 +369,29 @@ namespace DB
                     inputParameter);
         }
 
-        public Expression<Func<byte[], int, T>> CreateDeserializer()
+        public Expression<Func<Stream, T>> CreateDeserializer()
         {
-            var inputParameter = Expression.Parameter(typeof(byte[]), "input");
-            var offsetParameter = Expression.Parameter(typeof(int), "offset");
+            var inputParameter = Expression.Parameter(typeof(Stream), "stream");
 
             var outputVar = Expression.Variable(_type, "ret");
 
             var returnLabel = Expression.Label("return");
 
             if (IsNullable(_type, out var ut)){
-                return Expression.Lambda<Func<byte[], int, T>>(
+                return Expression.Lambda<Func<Stream, T>>(
                     Expression.Block(
                         outputVar,
-                        AddNullableReadWrapper(inputParameter, offsetParameter, outputVar, _type, ut),
-                        CreateReadExpression(inputParameter, outputVar, offsetParameter, ut)
-                    ), inputParameter, offsetParameter
+                        AddNullableReadWrapper(inputParameter, outputVar, _type, ut),
+                        CreateReadExpression(inputParameter, outputVar, ut)
+                    ), inputParameter
                 );
             }
 
-            return Expression.Lambda<Func<byte[], int, T>>(
+            return Expression.Lambda<Func<Stream, T>>(
                 Expression.Block(
                     new[] { outputVar },
-                    CreateReadExpression(inputParameter, outputVar, offsetParameter, _type)),
-                    inputParameter, offsetParameter
+                    CreateReadExpression(inputParameter, outputVar, _type)),
+                    inputParameter
             );
         }
 
@@ -486,7 +486,7 @@ namespace DB
             return Expression.Block(variables, expressions);
         }
 
-        private Expression CreateReadExpression(Expression input, Expression output, Expression offset, Type t)
+        private Expression CreateReadExpression(Expression input, Expression output, Type t)
         {
             if (t.IsPrimitive)
             {
@@ -506,11 +506,33 @@ namespace DB
                 // short System.Int16
                 // ushort System.UInt16
 
-                return _primitiveByteReaders[t].Invoke(input, offset);
+                return _primitiveByteReaders[t].Invoke(input);
+            }
+            if (t.IsArray)
+            {
+                var arr = Expression.Variable(t, "returnArr");
+                var arrSize = Expression.Variable(typeof(int), "arrSize");
+                var iVar = Expression.Variable(typeof(int), "i");
+
+                var readArrSize = _primitiveByteReaders[typeof(int)].Invoke(input);
+
+                var allocExpression = Expression.NewArrayBounds(t, arrSize);
+
+                var loopCond = Expression.GreaterThanOrEqual(iVar, arrSize);
+
+                var breakLabel = Expression.Label("break");
+                var loopBlock = Expression.Block(
+
+                    Expression.IfThen(loopCond, Expression.Break(breakLabel)),
+                    //Expression.Assign(Expression.ArrayAccess(arr, iVar), CreateReadExpression()),
+                    Expression.PostIncrementAssign(iVar)
+                );
+
+                var loopExp = Expression.Loop(loopBlock, breakLabel);
             }
 
             if (_builtInByteReaders.TryGetValue(t, out var func))
-                return func.Invoke(input, output, offset);
+                return func.Invoke(input, output);
 
             var variables = new List<ParameterExpression>();
             var expressions = new List<Expression>();
@@ -540,7 +562,7 @@ namespace DB
                     expressions.Add(
                         Expression.Assign(
                             Expression.Property(output, properties[i]),
-                            _primitiveByteReaders[pt].Invoke(input, Expression.Add(offset, byteCounterVar))));
+                            _primitiveByteReaders[pt].Invoke(input)));
 
 
                     expressions.Add(
@@ -551,7 +573,7 @@ namespace DB
                 }
                 else if(_builtInByteReaders.TryGetValue(pt, out var f))
                 {
-                    expressions.Add(f.Invoke(input, Expression.Property(output, properties[i]), Expression.Add(offset, byteCounterVar)));
+                    expressions.Add(f.Invoke(input, Expression.Property(output, properties[i])));
 
                     if (pt == typeof(string))
                     {
@@ -581,7 +603,7 @@ namespace DB
                 }
                 else if(IsNullable(pt, out var ut))
                 {
-                    expressions.Add(AddNullableReadWrapper(input, Expression.Add(offset, byteCounterVar), Expression.Property(output, properties[i]), pt, ut));
+                    expressions.Add(AddNullableReadWrapper(input, Expression.Property(output, properties[i]), pt, ut));
 
                     
                     expressions.Add(
@@ -627,23 +649,23 @@ namespace DB
                 );
         }
 
-        private Expression AddNullableReadWrapper(Expression input, Expression offset, Expression output, Type type, Type underlyingType)
+        private Expression AddNullableReadWrapper(Expression input, Expression output, Type type, Type underlyingType)
         {
             var typeSize = Marshal.SizeOf(underlyingType);
 
             byte[] nullSignature = Encoding.ASCII.GetBytes("N");
 
-            var isNilExpression = Expression.Equal(Expression.ArrayAccess(input, offset), Expression.Constant(nullSignature[0]));
+            var isNilExpression = Expression.Equal(Expression.ArrayAccess(input, Expression.Constant(0)), Expression.Constant(nullSignature[0]));
 
             Expression elseExpr = Expression.Throw(Expression.Constant("Does not support nullable classes"), typeof(Exception));
 
             if (underlyingType.IsPrimitive)
             {
-                elseExpr = Expression.Assign(output, Expression.Convert(_primitiveByteReaders[underlyingType].Invoke(input, offset), type));
+                elseExpr = Expression.Assign(output, Expression.Convert(_primitiveByteReaders[underlyingType].Invoke(input), type));
             }
 
             if (_builtInByteReaders.TryGetValue(underlyingType, out var func))
-                elseExpr = func.Invoke(input, output, offset);
+                elseExpr = func.Invoke(input, output);
 
             return Expression.IfThenElse(
                 isNilExpression,
@@ -657,6 +679,16 @@ namespace DB
             underlyingType = Nullable.GetUnderlyingType(t);
 
             return underlyingType != null;
+        }
+
+        public byte[] Serialize(T value)
+        {
+            return _serialize.Invoke(value);
+        }
+
+        public T Deserialize(Stream stream)
+        {
+            return _deserialize.Invoke(stream);
         }
     }
 }
