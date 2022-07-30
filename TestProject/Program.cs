@@ -5,31 +5,7 @@ using System.Diagnostics;
 using System.Text;
 using TestProject;
 
-// Test write speed
-
-FileStream testStream = File.Open("Test.bin", FileMode.OpenOrCreate);
-
-
-using var memoryStream = new MemoryStream();
-for(int i = 0; i < int.MaxValue; i++)
-{
-    testStream.WriteInt(i);
-}
-
-testStream.Seek(0, SeekOrigin.Begin);
-
-for(int i = 0; i < int.MaxValue; i++)
-{
-    int t = testStream.ReadInt();
-}
-
-//memoryStream.CopyTo(testStream);
-
-testStream.Flush();
-
-
-return;
-var num = 1000;
+var num = 10000;
 
 var d = new DiskIndex<long, long>(num);
 

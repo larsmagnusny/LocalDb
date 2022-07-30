@@ -19,7 +19,7 @@ namespace DB.Tests
             using (var memoryStream = new MemoryStream(boolBuf))
             {
 
-                bool b = memoryStream.ReadBool();
+                bool b = memoryStream.ReadUnmanaged<bool>();
 
                 Assert.IsTrue(b);
             }
@@ -28,7 +28,7 @@ namespace DB.Tests
 
             using (var memoryStream = new MemoryStream(boolBuf))
             {
-                bool b = memoryStream.ReadBool();
+                bool b = memoryStream.ReadUnmanaged<bool>();
 
                 Assert.IsFalse(b);
             }
@@ -41,7 +41,7 @@ namespace DB.Tests
             {
                 var buf = new byte[] { b };
                 using var memoryStream = new MemoryStream(buf);
-                var sb = memoryStream.ReadByteNew();
+                var sb = memoryStream.ReadUnmanaged<byte>();
 
                 Assert.IsTrue(b == sb);
             }
@@ -54,7 +54,7 @@ namespace DB.Tests
             {
                 var buf = new byte[] { (byte)b };
                 using var memoryStream = new MemoryStream(buf);
-                var sb = memoryStream.ReadSByte();
+                var sb = memoryStream.ReadUnmanaged<sbyte>();
 
                 Assert.IsTrue(b == sb);
             }
@@ -67,7 +67,7 @@ namespace DB.Tests
             {
                 var buf = BitConverter.GetBytes(c);
                 using var memoryStream = new MemoryStream(buf);
-                var sc = memoryStream.ReadChar();
+                var sc = memoryStream.ReadUnmanaged<char>();
 
                 Assert.IsTrue(c == sc);
             }
@@ -83,7 +83,7 @@ namespace DB.Tests
                 var dd = random.NextDouble() * d;
                 var buf = BitConverter.GetBytes(dd);
                 using var memoryStream = new MemoryStream(buf);
-                var sc = memoryStream.ReadDouble();
+                var sc = memoryStream.ReadUnmanaged<double>();
 
                 Assert.IsTrue(dd == sc);
             }
@@ -99,7 +99,7 @@ namespace DB.Tests
                 var dd = random.NextSingle() * d;
                 var buf = BitConverter.GetBytes(dd);
                 using var memoryStream = new MemoryStream(buf);
-                var sc = memoryStream.ReadFloat();
+                var sc = memoryStream.ReadUnmanaged<float>();
 
                 Assert.IsTrue(dd == sc);
             }
@@ -120,7 +120,7 @@ namespace DB.Tests
 
             for (int i = -10000; i < 10000; i++)
             {
-                Assert.IsTrue(memoryStream.ReadInt() == i);
+                Assert.IsTrue(memoryStream.ReadUnmanaged<int>() == i);
             }
         }
 
@@ -139,7 +139,7 @@ namespace DB.Tests
 
             for (uint i = 0; i < 10000; i++)
             {
-                Assert.IsTrue(memoryStream.ReadInt() == i);
+                Assert.IsTrue(memoryStream.ReadUnmanaged<uint>() == i);
             }
         }
 
@@ -158,7 +158,7 @@ namespace DB.Tests
 
             for (long i = -10000; i < 10000; i++)
             {
-                Assert.IsTrue(memoryStream.ReadLong() == i);
+                Assert.IsTrue(memoryStream.ReadUnmanaged<long>() == i);
             }
         }
 
@@ -177,7 +177,7 @@ namespace DB.Tests
 
             for (ulong i = 0; i < 10000; i++)
             {
-                Assert.IsTrue(memoryStream.ReadULong() == i);
+                Assert.IsTrue(memoryStream.ReadUnmanaged<ulong>() == i);
             }
         }
 
@@ -196,7 +196,7 @@ namespace DB.Tests
 
             for (short i = short.MinValue; i < short.MaxValue; i++)
             {
-                Assert.IsTrue(memoryStream.ReadShort() == i);
+                Assert.IsTrue(memoryStream.ReadUnmanaged<short>() == i);
             }
         }
 
@@ -215,7 +215,7 @@ namespace DB.Tests
 
             for (ushort i = ushort.MinValue; i < ushort.MaxValue; i++)
             {
-                Assert.IsTrue(memoryStream.ReadUShort() == i);
+                Assert.IsTrue(memoryStream.ReadUnmanaged<ushort>() == i);
             }
         }
     }

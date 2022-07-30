@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -29,29 +30,103 @@ namespace DB
 
     public class Page<T>
     {
+        public Page(long id, long from, int itemsPerPage, T? defaultValue = default)
+        {
+            Id = id;
+            From = from;
+            Modified = true;
+            Cache = new T[itemsPerPage];
+            Hits = 0;
+            TimeLoaded = DateTime.UtcNow;
+
+            if (defaultValue != null && !defaultValue.Equals(default(T)))
+            {
+                for (int i = 0; i < Cache.Length; i++)
+                {
+                    Cache[i] = defaultValue;
+                }
+            }
+        }
+
+        public long Id { get; set; }
         public long From { get; set; }
         public bool Modified { get; set; }
         public T[] Cache { get; set; }
         public DateTime TimeLoaded { get; set; }
         public int Hits { get; set; }
+
+        public virtual void Save(Stream stream)
+        {
+            if (Modified)
+            {
+                stream.Seek(From, SeekOrigin.Begin);
+                for (long i = 0; i < Cache.Length; i++)
+                {
+                    stream.WriteManaged(Cache[i]);
+                }
+            }
+        }
+
+        public virtual void LoadFromFile(Stream stream)
+        {
+            stream.Seek(From, SeekOrigin.Begin);
+
+            for (long i = 0; i < Cache.Length; i++)
+            {
+                Cache[i] = stream.ReadManaged<T>();
+            }
+        }
+    }
+
+    public class UnmanagedPage<T> : Page<T> where T : unmanaged
+    {
+        public UnmanagedPage(long id, long from, int itemsPerPage, T defaultValue = default) : base(id, from, itemsPerPage, defaultValue)
+        {
+        }
+
+        public override void Save(Stream stream)
+        {
+            if (Modified)
+            {
+                stream.Seek(From, SeekOrigin.Begin);
+                for (long i = 0; i < Cache.Length; i++)
+                {
+                    stream.WriteUnmanaged(Cache[i]);
+                }
+            }
+        }
+
+        public override void LoadFromFile(Stream stream)
+        {
+            stream.Seek(From, SeekOrigin.Begin);
+
+            for (long i = 0; i < Cache.Length; i++)
+            {
+                Cache[i] = stream.ReadUnmanaged<T>();
+            }
+        }
     }
 
     public class PageCache<T>
     {
-        public PageCache()
+        public PageCache(FileStream stream, bool isUnmanaged = false, T ? defaultValue = default)
         {
-            Cache = new Dictionary<long, Page<T>>();
-            PageIds = new Queue<long>();
+            Stream = stream;
+
+            IsUnmanaged = isUnmanaged;
+            DefaultValue = defaultValue;
         }
 
-        public T DefaultValue { get; set; }
-
         public FileStream Stream { get; set; }
-        private Dictionary<long, Page<T>> Cache { get; set; }
-        private Queue<long> PageIds { get; set; }
+        private Dictionary<long, Page<T>> Cache { get; set; } = new();
+        private Queue<long> PageIds { get; set; } = new();
+
         private int TotalPages { get; set; }
         public int MaxPagesInMemory { get; set; }
         public int ItemsPerPage { get; set; }
+        public T? DefaultValue { get; set; }
+
+        public bool IsUnmanaged { get; set; }
 
         public bool IsOverflowing()
         {
@@ -72,13 +147,19 @@ namespace DB
                         var pageId = PageIds.Dequeue();
                         var page = Cache[pageId];
 
-                        SavePage(ref page);
+                        page.Save(Stream);
+
                         Cache.Remove(pageId);
                     }
 
                     Console.WriteLine($"Removed {count - 1} pages");
                 }
             }
+        }
+
+        public long GetPageId(long cachePtr)
+        {
+            return cachePtr / ItemsPerPage;
         }
 
         public Page<T> GetPage(long pageId)
@@ -94,65 +175,48 @@ namespace DB
             return LoadPage(pageId);
         }
 
-        public Page<T> CreatePage(long from)
+        public Page<T> CreatePage(long id, long from)
         {
-            Page<T> p = new Page<T>
-            {
-                From = from,
-                Modified = true,
-                Cache = new T[ItemsPerPage],
-                TimeLoaded = DateTime.UtcNow,
-                Hits = 0
-            };
 
-            if (!DefaultValue.Equals(default(T)))
+            Page<T> ret;
+            if (!IsUnmanaged)
             {
-                for (int i = 0; i < p.Cache.Length; i++)
-                {
-                    p.Cache[i] = DefaultValue;
-                }
+                return new Page<T>(id, from, ItemsPerPage, DefaultValue);
             }
 
-            return p;
+            var t = typeof(UnmanagedPage<>);
+
+            var tt = t.MakeGenericType(typeof(T));
+
+            return (Page<T>)Activator.CreateInstance(tt, id, from, ItemsPerPage, DefaultValue);
         }
 
         public Page<T> LoadPage(long pageId)
         {
             lock (Cache)
             {
-                lock (Stream)
+                // first
+                long from = pageId * ItemsPerPage;
+
+                Page<T> p;
+
+                p = CreatePage(pageId, from);
+
+                if (pageId < TotalPages)
                 {
-                    // first
-                    long from = pageId * ItemsPerPage;
+                    Stream.Seek(p.From, SeekOrigin.Begin);
 
-                    Page<T> p;
-
-                    if (pageId < TotalPages)
-                    {
-                        p = ReadPage(from);
-                    }
-
-                    p = CreatePage(from);
-
-                    Cache[pageId] = p;
-                    PageIds.Enqueue(pageId);
-
-                    return p;
+                    p.LoadFromFile(Stream);
                 }
-            }
-        }
+                else
+                {
+                    TotalPages++;
+                }
 
-        private Page<T> ReadPage(long from)
-        {
-            return Stream.Read<Page<T>>(from);
-        }
+                Cache[pageId] = p;
+                PageIds.Enqueue(pageId);
 
-        public void SavePage(ref Page<T> page)
-        {
-            if (page.Modified)
-            {
-                Stream.Seek(page.From, SeekOrigin.Begin);
-                Stream.Write(page.Cache);
+                return p;
             }
         }
 
@@ -169,8 +233,7 @@ namespace DB
                             var pageId = PageIds.Dequeue();
                             var page = Cache[pageId];
 
-                            if (page.Modified)
-                                SavePage(ref page);
+                            page.Save(Stream);
 
                             Cache.Remove(pageId);
                         }
@@ -182,61 +245,10 @@ namespace DB
 
     public struct Slot
     {
-        public long hashCode;
-        public long prev;
-        public long next;
-        public long keyPtr;
-
-        public static Slot CreateSlot(long _hashCode, long _prev, long _next, long _keyPtr)
-        {
-            Slot slot;
-
-            slot.hashCode = _hashCode;
-            slot.prev = _prev;
-            slot.next = _next;
-            slot.keyPtr = _keyPtr;
-
-            return slot;
-        }
-
-        public static Slot CreateSlot(byte[] bytes, int offset)
-        {
-            Slot s;
-            int size = 32;
-            IntPtr ptr = IntPtr.Zero;
-            try
-            {
-                ptr = Marshal.AllocHGlobal(size);
-
-                Marshal.Copy(bytes, offset, ptr, size);
-
-                s = (Slot)Marshal.PtrToStructure(ptr, typeof(Slot));
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(ptr);
-            }
-            return s;
-        }
-
-        public byte[] GetBytes()
-        {
-            int size = Marshal.SizeOf(this);
-            byte[] arr = new byte[size];
-
-            IntPtr ptr = IntPtr.Zero;
-            try
-            {
-                ptr = Marshal.AllocHGlobal(size);
-                Marshal.StructureToPtr(this, ptr, true);
-                Marshal.Copy(ptr, arr, 0, size);
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(ptr);
-            }
-            return arr;
-        }
+        public long HashCode;
+        public long Prev;
+        public long Next;
+        public long KeyPtr;
     }
 
     public class DiskIndex<Key, Value> where Key : struct
@@ -278,25 +290,35 @@ namespace DB
         private Type _keyType;
         private Type _valueType;
 
-        private Serializer<Key> _keySerializer;
-        private Serializer<Value> _valueSerializer;
+        //private Serializer<Key> _keySerializer;
+        //private Serializer<Value> _valueSerializer;
 
         private Thread[] _pageManagerThreads;
         private bool _pageManagerRunning = true;
 
         public DiskIndex(long capacity = 127)
         {
-            _keySerializer = new Serializer<Key>();
-            _valueSerializer = new Serializer<Value>();
-            _bucketCache = new PageCache<long>();
-            _bucketCache.DefaultValue = (long)-1;
+            try
+            {
+                File.Delete("buckets_00.bin");
+                File.Delete("slots_00.bin");
+                File.Delete("keys_00.bin");
+                File.Delete("values_00.bin");
+            }
+            catch { }
 
-            _slotCache = new PageCache<Slot>();
-            _keyCache = new PageCache<Key<Key>>();
-            _valueCache = new PageCache<Value>();
+            //_keySerializer = new Serializer<Key>();
+            //_valueSerializer = new Serializer<Value>();
 
             _keyType = typeof(Key);
             _valueType = typeof(Value);
+
+            _bucketCache = new PageCache<long>(File.Open("buckets_00.bin", FileMode.OpenOrCreate), true, -1);
+
+            _slotCache = new PageCache<Slot>(File.Open("slots_00.bin", FileMode.OpenOrCreate), true);
+            _keyCache = new PageCache<Key<Key>>(File.Open("keys_00.bin", FileMode.OpenOrCreate), _keyType.IsUnmanaged());
+            _valueCache = new PageCache<Value>(File.Open("values_00.bin", FileMode.OpenOrCreate), _valueType.IsUnmanaged());
+
 
             int MaxMemoryPerCache = 128 * 1024 * 1024;
 
@@ -340,22 +362,8 @@ namespace DB
             _pageManagerThreads[2] = new Thread(() => PageManagerThread(_slotCache));
             _pageManagerThreads[3] = new Thread(() => PageManagerThread(_valueCache));
 
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < _pageManagerThreads.Length; i++)
                 _pageManagerThreads[i].Start();
-
-            try
-            {
-                File.Delete("buckets_00.bin");
-                File.Delete("slots_00.bin");
-                File.Delete("keys_00.bin");
-                File.Delete("values_00.bin");
-            }
-            catch { }
-
-            _bucketCache.Stream = File.Open("buckets_00.bin", FileMode.OpenOrCreate);
-            _slotCache.Stream = File.Open("slots_00.bin", FileMode.OpenOrCreate);
-            _keyCache.Stream = File.Open("keys_00.bin", FileMode.OpenOrCreate);
-            _valueCache.Stream = File.Open("values_00.bin", FileMode.OpenOrCreate);
 
             Grow(capacity);
         }
@@ -372,14 +380,11 @@ namespace DB
             }
         }
 
-        private long GetPageId(long filePtr, long cacheSize)
-        {
-            return filePtr / cacheSize;
-        }
+        
 
         private Value GetValue(long valuePtr)
         {
-            var pageId = GetPageId(valuePtr, _valueCacheSize);
+            var pageId = _valueCache.GetPageId(valuePtr);
 
             var p = _valueCache.GetPage(pageId);
 
@@ -392,7 +397,7 @@ namespace DB
         {
             var valuePtr = _lastValuePtr;
 
-            var pageId = GetPageId(valuePtr, _valueCacheSize);
+            var pageId = _valueCache.GetPageId(valuePtr);
 
             var p = _valueCache.GetPage(pageId);
 
@@ -409,7 +414,7 @@ namespace DB
 
         private Key<Key> GetKey(long keyPtr)
         {
-            var pageId = GetPageId(keyPtr, _keyCacheSize);
+            var pageId = _keyCache.GetPageId(keyPtr);
 
             Page<Key<Key>> p = _keyCache.GetPage(pageId);
 
@@ -422,7 +427,7 @@ namespace DB
         {
             var keyPtr = _lastKeyPtr;
 
-            var pageId = GetPageId(keyPtr, _keyCacheSize);
+            var pageId = _keyCache.GetPageId(keyPtr);
 
             var p = _keyCache.GetPage(pageId);
 
@@ -438,18 +443,19 @@ namespace DB
 
         private void SetBucket(long bucketPtr, long slotPtr)
         {
-            var pageId = GetPageId(bucketPtr, _bucketCacheSize);
+            var pageId = _bucketCache.GetPageId(bucketPtr);
 
             var p = _bucketCache.GetPage(pageId);
 
             p.Hits++;
+            p.Modified = true;
 
             p.Cache[slotPtr - p.From] = slotPtr;
         }
 
         private long GetBucket(long bucketPtr)
         {
-            var pageId = GetPageId(bucketPtr, _bucketCacheSize);
+            var pageId = _bucketCache.GetPageId(bucketPtr);
 
             var p = _bucketCache.GetPage(pageId);
 
@@ -460,7 +466,7 @@ namespace DB
 
         private Slot GetSlot(long slotPtr)
         {
-            var pageId = GetPageId(slotPtr, _slotCacheSize);
+            var pageId = _slotCache.GetPageId(slotPtr);
 
             var p = _slotCache.GetPage(pageId);
 
@@ -469,52 +475,62 @@ namespace DB
             return p.Cache[slotPtr - p.From];
         }
 
-        private void SetSlot(long slotPtr, Slot slot)
+        private void SetSlot(long slotPtr, long hashCode, long prev, long next, long keyPtr)
         {
-            var pageId = GetPageId(slotPtr, _slotCacheSize);
+            var pageId = _slotCache.GetPageId(slotPtr);
 
             var p = _slotCache.GetPage(pageId);
 
             p.Hits++;
 
-            p.Cache[slotPtr - p.From] = slot;
+            Slot s;
+            s.HashCode = hashCode;
+            s.Prev = prev;
+            s.Next = next;
+            s.KeyPtr = keyPtr;
+
+            p.Modified = true;
+
+            p.Cache[slotPtr - p.From] = s;
         }
 
-        private long AddSlot(Slot slot)
+        private long AddSlot(long hashCode, long prev, long next, long keyPtr)
         {
             var curSlotPtr = _lastSlotPtr;
 
-            var pageId = GetPageId(curSlotPtr, _slotCacheSize);
+            var pageId = _slotCache.GetPageId(curSlotPtr);
 
             var p = _slotCache.GetPage(pageId);
 
             p.Hits++;
 
-            p.Cache[curSlotPtr - p.From] = slot;
+            SetSlot(curSlotPtr, hashCode, prev, next, keyPtr);
 
             _lastSlotPtr++;
 
-            if (slot.next != -1)
+            if (next != -1)
             {
-                var nextPageId = GetPageId(slot.next, _slotCacheSize);
+                var nextPageId = _slotCache.GetPageId(next);
 
                 var nP = _slotCache.GetPage(nextPageId);
 
                 nP.Hits++;
 
-                nP.Cache[slot.next - nP.From].prev = curSlotPtr;
+                nP.Cache[next - nP.From].Prev = curSlotPtr;
             }
 
-            if (slot.prev != -1)
+            if (prev != -1)
             {
-                var prevPageId = GetPageId(slot.prev, _slotCacheSize);
+                var prevPageId = _slotCache.GetPageId(prev);
 
                 var pP = _slotCache.GetPage(prevPageId);
 
                 pP.Hits++;
 
-                pP.Cache[slot.prev - pP.From].next = curSlotPtr;
+                pP.Cache[prev - pP.From].Next = curSlotPtr;
             }
+
+            p.Modified = true;
 
             return curSlotPtr;
         }
@@ -524,10 +540,10 @@ namespace DB
             long ret = slotPtr;
             var slot = GetSlot(slotPtr);
 
-            while (slot.next >= 0)
+            while (slot.Next >= 0)
             {
-                ret = slot.next;
-                slot = GetSlot(slot.next);
+                ret = slot.Next;
+                slot = GetSlot(slot.Next);
             }
 
             return ret;
@@ -538,10 +554,10 @@ namespace DB
             long ret = slotPtr;
             var slot = GetSlot(slotPtr);
 
-            while (slot.prev >= 0)
+            while (slot.Prev >= 0)
             {
-                ret = slot.prev;
-                slot = GetSlot(slot.prev);
+                ret = slot.Prev;
+                slot = GetSlot(slot.Prev);
             }
 
             return ret;
@@ -567,7 +583,7 @@ namespace DB
                 do
                 {
                     var slot = GetSlot(slotPtr);
-                    var hashCode = (uint)slot.hashCode;
+                    var hashCode = (uint)slot.HashCode;
                     var newBucketPtr = (hashCode % newCapacity) * _bucketSize;
 
                     if (newBucketPtr == bucketPtr)
@@ -577,73 +593,75 @@ namespace DB
 
                     if (newSlotPtr == -1)
                     {
-                        if (slot.next >= 0 && slot.prev >= 0)
+                        if (slot.Next >= 0 && slot.Prev >= 0)
                         {
-                            SetBucket(bucketPtr, GetFirstSlotPtr(slot.prev));
+                            SetBucket(bucketPtr, GetFirstSlotPtr(slot.Prev));
                             SetBucket(newBucketPtr, slotPtr);
 
-                            var prevSlot = GetSlot(slot.prev);
-                            var nextSlot = GetSlot(slot.next);
+                            var prevSlot = GetSlot(slot.Prev);
+                            var nextSlot = GetSlot(slot.Next);
 
-                            SetSlot(slot.prev, Slot.CreateSlot(prevSlot.hashCode, prevSlot.prev, slot.next, prevSlot.keyPtr));
-                            SetSlot(slot.next, Slot.CreateSlot(nextSlot.hashCode, slot.prev, nextSlot.next, nextSlot.keyPtr));
-                            SetSlot(slotPtr, Slot.CreateSlot(hashCode, -1, -1, slot.keyPtr));
+                            SetSlot(slot.Prev, prevSlot.HashCode, prevSlot.Prev, slot.Next, prevSlot.KeyPtr);
+                            SetSlot(slot.Next, nextSlot.HashCode, slot.Prev, nextSlot.Next, nextSlot.KeyPtr);
+                            SetSlot(slotPtr, hashCode, -1, -1, slot.KeyPtr);
                         }
-                        else if (slot.next >= 0 && slot.prev < 0)
+                        else if (slot.Next >= 0 && slot.Prev < 0)
                         {
-                            SetBucket(bucketPtr, slot.next);
+                            SetBucket(bucketPtr, slot.Next);
                             SetBucket(newBucketPtr, slotPtr);
 
-                            var nextSlot = GetSlot(slot.next);
+                            var nextSlot = GetSlot(slot.Next);
 
-                            SetSlot(slot.next, Slot.CreateSlot(nextSlot.hashCode, -1, nextSlot.next, nextSlot.keyPtr));
-                            SetSlot(slotPtr, Slot.CreateSlot(hashCode, -1, -1, slot.keyPtr));
+                            SetSlot(slot.Next, nextSlot.HashCode, -1, nextSlot.Next, nextSlot.KeyPtr);
+                            SetSlot(slotPtr, hashCode, -1, -1, slot.KeyPtr);
                         }
-                        else if (slot.prev >= 0 && slot.next < 0)
+                        else if (slot.Prev >= 0 && slot.Next < 0)
                         {
-                            SetBucket(bucketPtr, GetFirstSlotPtr(slot.prev));
+                            SetBucket(bucketPtr, GetFirstSlotPtr(slot.Prev));
                             SetBucket(newBucketPtr, slotPtr);
 
-                            var prevSlot = GetSlot(slot.prev);
+                            var prevSlot = GetSlot(slot.Prev);
 
-                            SetSlot(slot.prev, Slot.CreateSlot(prevSlot.hashCode, prevSlot.prev, -1, prevSlot.keyPtr));
-                            SetSlot(slotPtr, Slot.CreateSlot(hashCode, -1, -1, slot.keyPtr));
+
+                            SetSlot(slot.Prev, prevSlot.HashCode, prevSlot.Prev, -1, prevSlot.KeyPtr);
+
+                            SetSlot(slotPtr, hashCode, -1, -1, slot.KeyPtr);
                         }
                         else // Just one item in bucket
                         {
                             SetBucket(bucketPtr, -1);
                             SetBucket(newBucketPtr, slotPtr);
 
-                            SetSlot(slotPtr, Slot.CreateSlot(hashCode, -1, -1, slot.keyPtr));
+                            SetSlot(slotPtr, hashCode, -1, -1, slot.KeyPtr);
                         }
 
                         //TestGetValue(newBucketPtr);
                     }
                     else
                     {
-                        if (slot.prev >= 0 && slot.next >= 0)
+                        if (slot.Prev >= 0 && slot.Next >= 0)
                         {
-                            var firstSlot = GetFirstSlotPtr(slot.prev);
+                            var firstSlot = GetFirstSlotPtr(slot.Prev);
 
                             SetBucket(bucketPtr, firstSlot);
 
-                            var prevSlot = GetSlot(slot.prev);
+                            var prevSlot = GetSlot(slot.Prev);
 
-                            SetSlot(slot.prev, Slot.CreateSlot(prevSlot.hashCode, prevSlot.prev, slot.next, prevSlot.keyPtr));
+                            SetSlot(slot.Prev, prevSlot.HashCode, prevSlot.Prev, slot.Next, prevSlot.KeyPtr);
                         }
-                        else if (slot.next == -1 && slot.prev >= 0)
+                        else if (slot.Next == -1 && slot.Prev >= 0)
                         {
-                            var firstSlot = GetFirstSlotPtr(slot.prev);
+                            var firstSlot = GetFirstSlotPtr(slot.Prev);
 
                             SetBucket(bucketPtr, firstSlot);
 
-                            var prevSlot = GetSlot(slot.prev);
+                            var prevSlot = GetSlot(slot.Prev);
 
-                            SetSlot(slot.prev, Slot.CreateSlot(prevSlot.hashCode, prevSlot.prev, -1, prevSlot.keyPtr));
+                            SetSlot(slot.Prev, prevSlot.HashCode, prevSlot.Prev, -1, prevSlot.KeyPtr);
                         }
-                        else if (slot.next >= 0 && slot.prev == -1)
+                        else if (slot.Next >= 0 && slot.Prev == -1)
                         {
-                            SetBucket(bucketPtr, slot.next);
+                            SetBucket(bucketPtr, slot.Next);
                         }
                         else
                         {
@@ -653,12 +671,12 @@ namespace DB
 
                         var lastSlotPtr = GetLastSlotPtr(newSlotPtr);
 
-                        AddSlot(Slot.CreateSlot(hashCode, lastSlotPtr, -1, slot.keyPtr));
+                        AddSlot(hashCode, lastSlotPtr, -1, slot.KeyPtr);
 
-                        //TestGetValue(newBucketPtr);
+                        slot = default;
                     }
 
-                    slotPtr = slot.next;
+                    slotPtr = slot.Next;
                 }
                 while (slotPtr >= 0);
             }
@@ -671,7 +689,7 @@ namespace DB
                 do
                 {
                     var slot = GetSlot(slotPtr);
-                    slotPtr = slot.next;
+                    slotPtr = slot.Next;
 
                     yield return slot;
                 } while (slotPtr >= 0);
@@ -681,7 +699,7 @@ namespace DB
                 do
                 {
                     var slot = GetSlot(slotPtr);
-                    slotPtr = slot.prev;
+                    slotPtr = slot.Prev;
 
                     yield return slot;
                 } while (slotPtr >= 0);
@@ -696,7 +714,7 @@ namespace DB
 
             foreach (var fwdSlot in fwdSlots)
             {
-                var keyPtr = fwdSlot.keyPtr;
+                var keyPtr = fwdSlot.KeyPtr;
                 var key = GetKey(keyPtr);
 
                 var value = GetValue(key.ValuePtr);
@@ -726,7 +744,7 @@ namespace DB
         {
             for (int i = 0; i < _capacity; i++)
             {
-                var bucketPtr = i * _bucketSize;
+                var bucketPtr = i;
 
                 var slotPtr = GetBucket(bucketPtr);
 
@@ -737,7 +755,7 @@ namespace DB
 
                 foreach (var slot in slots)
                 {
-                    var key = GetKey(slot.keyPtr);
+                    var key = GetKey(slot.KeyPtr);
 
                     yield return key.KeyValue;
                 }
@@ -759,14 +777,14 @@ namespace DB
                 do
                 {
                     var slot = GetSlot(slotPtr);
-                    var keyResult = GetKey(slot.keyPtr);
+                    var keyResult = GetKey(slot.KeyPtr);
 
-                    if (slot.hashCode == hashCode && keyResult.KeyValue.Equals(index))
+                    if (slot.HashCode == hashCode && keyResult.KeyValue.Equals(index))
                     {
                         return GetValue(keyResult.ValuePtr);
                     }
 
-                    slotPtr = slot.next;
+                    slotPtr = slot.Next;
                 } while (slotPtr >= 0);
 
                 return default;
@@ -783,7 +801,8 @@ namespace DB
                 {
                     var valuePtr = AddValue(value);
                     var keyPtr = AddKey(Key<Key>.CreateKey(index, valuePtr));
-                    slotPtr = AddSlot(Slot.CreateSlot(hashCode, -1, -1, keyPtr));
+
+                    slotPtr = AddSlot(hashCode, -1, -1, keyPtr);
                     SetBucket(bucketId, slotPtr);
                     _count++;
                 }
@@ -793,7 +812,7 @@ namespace DB
 
                     var valuePtr = AddValue(value);
                     var keyPtr = AddKey(Key<Key>.CreateKey(index, valuePtr));
-                    AddSlot(Slot.CreateSlot(hashCode, lastSlotPtr, -1, keyPtr));
+                    AddSlot(hashCode, lastSlotPtr, -1, keyPtr);
                     _count++;
                 }
 
