@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq.Expressions;
 using System.Runtime.InteropServices;
@@ -54,12 +55,24 @@ namespace DB
 
 
 
+        public static unsafe void ReadUnmanaged<T>(this Stream stream, T[] buffer, int index) where T : unmanaged
+        {
+            fixed (T* ptr = &buffer[index])
+            {
+                Span<byte> ptrSpan = new(ptr, sizeof(T));
+
+                if (!BitConverter.IsLittleEndian)
+                    ptrSpan.Reverse();
+
+                stream.Read(ptrSpan);
+            }
+        }
+
         public static unsafe T ReadUnmanaged<T>(this Stream stream) where T : unmanaged
         {
             T value;
-            T* ptr = &value;
 
-            Span<byte> ptrSpan = new(ptr, sizeof(T));
+            Span<byte> ptrSpan = new(&value, sizeof(T));
 
             if (!BitConverter.IsLittleEndian)
                 ptrSpan.Reverse();
@@ -67,14 +80,24 @@ namespace DB
             stream.Read(ptrSpan);
 
             return value;
-            
+        }
+
+        public static unsafe void WriteUnmanaged<T>(this Stream stream, T[] buffer, int index) where T : unmanaged
+        {
+            fixed (T* ptr = &buffer[index])
+            {
+                Span<byte> ptrSpan = new(ptr, sizeof(T));
+
+                if (!BitConverter.IsLittleEndian)
+                    ptrSpan.Reverse();
+
+                stream.Write(ptrSpan);
+            }
         }
 
         public static unsafe void WriteUnmanaged<T>(this Stream stream, T value) where T : unmanaged
         {
-            T* ptr = &value;
-
-            Span<byte> ptrSpan = new(ptr, sizeof(T));
+            Span<byte> ptrSpan = new(&value, sizeof(T));
 
             if (!BitConverter.IsLittleEndian)
                 ptrSpan.Reverse();
